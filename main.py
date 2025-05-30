@@ -1,5 +1,5 @@
 """
-Corti AI Support Agent System - Simplified Version
+Corti AI Support Agent System - Simplified Version with Debug Logging
 Basic support ticket handling with Claude AI
 """
 
@@ -124,7 +124,10 @@ Response format:
     async def generate_response(self, user_message: str, conversation_context: Dict) -> SupportResponse:
         """Generate AI response to support ticket"""
         
+        logger.info(f"🤖 Generating response for message: {user_message[:100]}...")
+        
         if not claude_client:
+            logger.error("❌ Claude client not available")
             return SupportResponse(
                 message=self._generate_error_message(),
                 confidence=0.0,
@@ -134,9 +137,11 @@ Response format:
         
         # Get basic documentation context
         doc_context = await docs_manager.fetch_docs()
+        logger.info(f"📚 Documentation context length: {len(doc_context)} chars")
         
         # Generate response using Claude
         try:
+            logger.info("🧠 Calling Claude API...")
             response = claude_client.messages.create(
                 model=config.LLM_MODEL,
                 max_tokens=1000,
@@ -158,6 +163,7 @@ Please provide a helpful response based on this information.
             )
             
             ai_response = response.content[0].text
+            logger.info(f"✅ Claude response generated: {len(ai_response)} chars")
             
             # Simple confidence scoring based on response length and keywords
             confidence = self._calculate_confidence(user_message, ai_response)
@@ -167,6 +173,8 @@ Please provide a helpful response based on this information.
             
             sources = [config.CORTI_DOCS_BASE_URL] if doc_context else []
             
+            logger.info(f"📊 Response confidence: {confidence:.2f}, Should escalate: {should_escalate}")
+            
             return SupportResponse(
                 message=ai_response,
                 confidence=confidence,
@@ -175,7 +183,7 @@ Please provide a helpful response based on this information.
             )
             
         except Exception as e:
-            logger.error(f"Error generating AI response: {e}")
+            logger.error(f"❌ Error generating AI response: {e}")
             return SupportResponse(
                 message=self._generate_error_message(),
                 confidence=0.0,
@@ -249,9 +257,12 @@ class DraftManager:
         
         conn.commit()
         conn.close()
+        logger.info("📄 Draft database initialized")
     
     async def save_draft(self, conversation_id: str, user_message: str, response: SupportResponse, conversation_data: Dict):
         """Save AI draft response for human approval"""
+        logger.info(f"💾 Saving draft for conversation {conversation_id}")
+        
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -273,7 +284,7 @@ class DraftManager:
         conn.commit()
         conn.close()
         
-        logger.info(f"Draft saved for conversation {conversation_id}")
+        logger.info(f"✅ Draft saved for conversation {conversation_id}")
     
     async def get_pending_drafts(self) -> List[Dict]:
         """Get all pending draft responses"""
@@ -307,6 +318,8 @@ class DraftManager:
     
     async def approve_draft(self, conversation_id: str, reviewer: str) -> bool:
         """Approve and send draft response"""
+        logger.info(f"👍 Approving draft for conversation {conversation_id}")
+        
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -348,6 +361,8 @@ class DraftManager:
     
     async def reject_draft(self, conversation_id: str, reviewer: str) -> bool:
         """Reject draft response"""
+        logger.info(f"👎 Rejecting draft for conversation {conversation_id}")
+        
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -385,7 +400,7 @@ class IntercomClient:
         """Send AI response to Intercom conversation"""
         
         if not config.INTERCOM_ACCESS_TOKEN:
-            logger.error("No Intercom access token configured")
+            logger.error("❌ No Intercom access token configured")
             return
         
         # Format message with sources
@@ -413,12 +428,12 @@ class IntercomClient:
                 )
                 
                 if response.status_code in [200, 201]:
-                    logger.info(f"Successfully replied to conversation {conversation_id}")
+                    logger.info(f"✅ Successfully replied to conversation {conversation_id}")
                 else:
-                    logger.error(f"Failed to reply to conversation: {response.status_code} - {response.text}")
+                    logger.error(f"❌ Failed to reply to conversation: {response.status_code} - {response.text}")
                     
             except Exception as e:
-                logger.error(f"Error sending reply to Intercom: {e}")
+                logger.error(f"❌ Error sending reply to Intercom: {e}")
     
     async def add_tag_to_conversation(self, conversation_id: str, tag: str):
         """Add tag to conversation for tracking"""
@@ -436,8 +451,9 @@ class IntercomClient:
                     headers=self.headers,
                     json=payload
                 )
+                logger.info(f"🏷️ Added tag '{tag}' to conversation {conversation_id}")
             except Exception as e:
-                logger.error(f"Error adding tag: {e}")
+                logger.error(f"❌ Error adding tag: {e}")
 
 intercom_client = IntercomClient()
 
@@ -447,68 +463,61 @@ async def handle_intercom_webhook(
     request: Request, 
     background_tasks: BackgroundTasks
 ):
-    """Handle incoming Intercom webhooks"""
+    """Handle incoming Intercom webhooks with debug logging"""
     
     try:
         payload = await request.json()
         
-        # DEBUG: Log the entire payload
-        logger.info(f"🔍 DEBUG: Received webhook payload: {json.dumps(payload, indent=2)}")
+        # 🔍 DEBUG: Log the entire payload
+        logger.info(f"🔍 WEBHOOK PAYLOAD: {json.dumps(payload, indent=2)}")
         
+        # 🔍 DEBUG: Check webhook type
+        webhook_type = payload.get("type", "unknown")
+        logger.info(f"🔍 WEBHOOK TYPE: {webhook_type}")
+        
+        # 🔍 DEBUG: Look for message content
+        data_item = payload.get("data", {}).get("item", {})
+        source = data_item.get("source", {})
+        body = source.get("body", "NO BODY FOUND")
+        
+        logger.info(f"🔍 MESSAGE BODY: {body}")
+        logger.info(f"🔍 CONVERSATION ID: {data_item.get('id', 'NO ID FOUND')}")
+        
+        # Continue with normal processing
         webhook_data = IntercomWebhookPayload(**payload)
         
-        # DEBUG: Log the webhook type
-        logger.info(f"🔍 DEBUG: Webhook type: {webhook_data.type}")
-        
-        # Only process new conversations
         if webhook_data.type == "conversation.user.created":
-            logger.info(f"🔍 DEBUG: Processing conversation.user.created event")
+            logger.info("🔍 PROCESSING conversation.user.created")
             background_tasks.add_task(
                 process_new_conversation, 
                 webhook_data.data
             )
         else:
-            logger.info(f"🔍 DEBUG: Ignoring webhook type: {webhook_data.type}")
+            logger.info(f"🔍 IGNORING webhook type: {webhook_data.type}")
             
         return {"status": "received"}
         
     except Exception as e:
-        logger.error(f"❌ Error processing webhook: {e}")
-        raise HTTPException(status_code=400, detail="Invalid webhook payload")
-    request: Request, 
-    background_tasks: BackgroundTasks
-):
-    """Handle incoming Intercom webhooks"""
-    
-    try:
-        payload = await request.json()
-        webhook_data = IntercomWebhookPayload(**payload)
-        
-        # Only process new conversations
-        if webhook_data.type == "conversation.created":
-            background_tasks.add_task(
-                process_new_conversation, 
-                webhook_data.data
-            )
-            
-        return {"status": "received"}
-        
-    except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
-        raise HTTPException(status_code=400, detail="Invalid webhook payload")
+        logger.error(f"❌ WEBHOOK ERROR: {e}")
+        logger.error(f"❌ FULL ERROR DETAILS: {str(e)}")
+        return {"status": "error", "message": str(e)}
 
 async def process_new_conversation(conversation_data: Dict):
     """Process new conversation and generate AI draft response"""
     
     try:
+        logger.info(f"🔄 Processing new conversation data: {json.dumps(conversation_data, indent=2)}")
+        
         conversation_id = conversation_data["item"]["id"]
+        logger.info(f"📞 Processing conversation {conversation_id}")
         
         # Extract user message
         source = conversation_data["item"].get("source", {})
         user_message = source.get("body", "")
         
         if not user_message:
-            logger.info(f"No user message found in conversation {conversation_id}")
+            logger.warning(f"⚠️ No user message found in conversation {conversation_id}")
+            logger.info(f"🔍 Available source keys: {list(source.keys())}")
             return
         
         # Clean HTML tags from message
@@ -516,9 +525,10 @@ async def process_new_conversation(conversation_data: Dict):
         clean_message = soup.get_text().strip()
         
         if len(clean_message) < 10:  # Skip very short messages
+            logger.warning(f"⚠️ Message too short ({len(clean_message)} chars): {clean_message}")
             return
         
-        logger.info(f"Processing conversation {conversation_id}: {clean_message[:100]}...")
+        logger.info(f"✅ Processing conversation {conversation_id}: {clean_message[:100]}...")
         
         # Generate AI response
         response = await support_agent.generate_response(clean_message, conversation_data)
@@ -534,10 +544,11 @@ async def process_new_conversation(conversation_data: Dict):
         # Add tag to indicate AI draft is ready
         await intercom_client.add_tag_to_conversation(conversation_id, "ai-draft-ready")
         
-        logger.info(f"Draft prepared for conversation {conversation_id} - Escalate: {response.should_escalate}")
+        logger.info(f"🎉 Draft prepared for conversation {conversation_id} - Escalate: {response.should_escalate}")
         
     except Exception as e:
-        logger.error(f"Error processing conversation: {e}")
+        logger.error(f"❌ Error processing conversation: {e}")
+        logger.error(f"❌ Full error details: {str(e)}")
 
 # Draft approval endpoints
 @app.get("/drafts")
@@ -545,9 +556,10 @@ async def get_pending_drafts():
     """Get all pending draft responses for human review"""
     try:
         drafts = await draft_manager.get_pending_drafts()
+        logger.info(f"📋 Retrieved {len(drafts)} pending drafts")
         return {"drafts": drafts, "count": len(drafts)}
     except Exception as e:
-        logger.error(f"Error fetching drafts: {e}")
+        logger.error(f"❌ Error fetching drafts: {e}")
         raise HTTPException(status_code=500, detail="Error fetching drafts")
 
 @app.post("/drafts/{conversation_id}/approve")
@@ -556,11 +568,12 @@ async def approve_draft(conversation_id: str, reviewer: str = "human_agent"):
     try:
         success = await draft_manager.approve_draft(conversation_id, reviewer)
         if success:
+            logger.info(f"✅ Draft approved for conversation {conversation_id}")
             return {"status": "approved", "conversation_id": conversation_id}
         else:
             raise HTTPException(status_code=404, detail="Draft not found")
     except Exception as e:
-        logger.error(f"Error approving draft: {e}")
+        logger.error(f"❌ Error approving draft: {e}")
         raise HTTPException(status_code=500, detail="Error approving draft")
 
 @app.post("/drafts/{conversation_id}/reject")
@@ -569,18 +582,19 @@ async def reject_draft(conversation_id: str, reviewer: str = "human_agent"):
     try:
         success = await draft_manager.reject_draft(conversation_id, reviewer)
         if success:
+            logger.info(f"❌ Draft rejected for conversation {conversation_id}")
             return {"status": "rejected", "conversation_id": conversation_id}
         else:
             raise HTTPException(status_code=404, detail="Draft not found")
     except Exception as e:
-        logger.error(f"Error rejecting draft: {e}")
+        logger.error(f"❌ Error rejecting draft: {e}")
         raise HTTPException(status_code=500, detail="Error rejecting draft")
 
 # API endpoints
 @app.get("/")
 async def root():
     return {
-        "message": "Corti AI Support Agent System - Simplified",
+        "message": "Corti AI Support Agent System - Simplified with Debug",
         "status": "running",
         "timestamp": datetime.now().isoformat()
     }
@@ -600,14 +614,14 @@ async def health_check():
 @app.on_event("startup")
 async def startup_event():
     """Initialize system on startup"""
-    logger.info("Starting Corti AI Support Agent System (Simplified)...")
+    logger.info("🚀 Starting Corti AI Support Agent System (Simplified with Debug)...")
     
     # Fetch basic documentation
     try:
         await docs_manager.fetch_docs()
-        logger.info("Basic documentation loaded")
+        logger.info("📚 Basic documentation loaded")
     except Exception as e:
-        logger.error(f"Error loading docs: {e}")
+        logger.error(f"❌ Error loading docs: {e}")
 
 if __name__ == "__main__":
     uvicorn.run(
