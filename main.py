@@ -1,6 +1,6 @@
 """
-Corti AI Support Agent System
-Automated first-pass support ticket handling with RAG documentation search
+Corti AI Support Agent System - Simplified Version
+Basic support ticket handling with Claude AI
 """
 
 import os
@@ -18,16 +18,11 @@ import httpx
 from pydantic import BaseModel, Field
 import uvicorn
 
-# AI and vector search
+# AI
 import anthropic
-from sentence_transformers import SentenceTransformer
-import chromadb
-from chromadb.config import Settings
-import numpy as np
 
 # Web scraping for docs
 from bs4 import BeautifulSoup
-import aiofiles
 
 # Environment setup
 from dotenv import load_dotenv
@@ -35,7 +30,6 @@ load_dotenv()
 
 # Draft response storage
 import sqlite3
-from contextlib import asynccontextmanager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -49,10 +43,7 @@ class Config:
     CORTI_DOCS_BASE_URL = "https://docs.corti.ai"
     
     # AI Model settings
-    EMBEDDING_MODEL = "all-MiniLM-L6-v2"
     LLM_MODEL = "claude-3-sonnet-20240229"
-    MAX_CONTEXT_LENGTH = 8000
-    CONFIDENCE_THRESHOLD = 0.7
 
 config = Config()
 
@@ -61,14 +52,6 @@ class IntercomWebhookPayload(BaseModel):
     type: str
     data: Dict
     created_at: int
-
-class DocumentChunk(BaseModel):
-    id: str
-    content: str
-    url: str
-    title: str
-    section: str
-    embedding: Optional[List[float]] = None
 
 class SupportResponse(BaseModel):
     message: str
@@ -87,181 +70,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize AI components
-class AIComponents:
-    def __init__(self):
-        self.embedding_model = SentenceTransformer(config.EMBEDDING_MODEL)
-        self.chroma_client = chromadb.Client(Settings(
-            chroma_db_impl="duckdb+parquet",
-            persist_directory="./chroma_db"
-        ))
-        self.collection = self.chroma_client.get_or_create_collection(
-            name="corti_docs",
-            metadata={"hnsw:space": "cosine"}
-        )
-        self.claude_client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+# Initialize Claude client
+claude_client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY) if config.ANTHROPIC_API_KEY else None
 
-ai = AIComponents()
-
-# Documentation scraper and indexer
+# Documentation scraper (simplified)
 class DocumentationManager:
     def __init__(self):
-        self.scraped_urls = set()
+        self.docs_content = ""
         
-    async def scrape_docs(self) -> List[DocumentChunk]:
-        """Scrape and process Corti documentation"""
-        chunks = []
+    async def fetch_docs(self) -> str:
+        """Fetch basic documentation content"""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{config.CORTI_DOCS_BASE_URL}/", timeout=10.0)
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    # Remove script and style elements
+                    for script in soup(["script", "style"]):
+                        script.decompose()
+                    self.docs_content = soup.get_text()[:5000]  # First 5000 chars
+                    logger.info("Documentation fetched successfully")
+                    return self.docs_content
+        except Exception as e:
+            logger.error(f"Error fetching docs: {e}")
+            return "Documentation temporarily unavailable."
         
-        # Start with main docs page
-        urls_to_scrape = [
-            f"{config.CORTI_DOCS_BASE_URL}/",
-            f"{config.CORTI_DOCS_BASE_URL}/quickstart",
-            f"{config.CORTI_DOCS_BASE_URL}/get-access",
-            f"{config.CORTI_DOCS_BASE_URL}/languages", 
-            f"{config.CORTI_DOCS_BASE_URL}/standard-templates",
-            f"{config.CORTI_DOCS_BASE_URL}/real-time-ambient-documentation",
-            f"{config.CORTI_DOCS_BASE_URL}/dictation-sdk"
-        ]
-        
-        async with httpx.AsyncClient() as client:
-            for url in urls_to_scrape:
-                if url in self.scraped_urls:
-                    continue
-                    
-                try:
-                    logger.info(f"Scraping: {url}")
-                    response = await client.get(url, timeout=10.0)
-                    if response.status_code == 200:
-                        chunks.extend(await self._process_page(url, response.text))
-                        self.scraped_urls.add(url)
-                        
-                except Exception as e:
-                    logger.error(f"Error scraping {url}: {e}")
-                    
-                # Be nice to the server
-                await asyncio.sleep(1)
-        
-        return chunks
-    
-    async def _process_page(self, url: str, html: str) -> List[DocumentChunk]:
-        """Extract and chunk content from HTML page"""
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # Remove script and style elements
-        for script in soup(["script", "style"]):
-            script.decompose()
-        
-        title = soup.title.string if soup.title else "Corti Documentation"
-        
-        # Extract main content sections
-        chunks = []
-        sections = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-        
-        for i, section in enumerate(sections):
-            section_title = section.get_text().strip()
-            
-            # Get content until next section
-            content_parts = []
-            for sibling in section.next_siblings:
-                if hasattr(sibling, 'name') and sibling.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                    break
-                if hasattr(sibling, 'get_text'):
-                    text = sibling.get_text().strip()
-                    if text:
-                        content_parts.append(text)
-            
-            content = '\n'.join(content_parts)
-            
-            if len(content) > 50:  # Only include substantial content
-                chunk_id = hashlib.md5(f"{url}#{section_title}".encode()).hexdigest()
-                
-                chunk = DocumentChunk(
-                    id=chunk_id,
-                    content=f"{section_title}\n\n{content}",
-                    url=url,
-                    title=title,
-                    section=section_title
-                )
-                chunks.append(chunk)
-        
-        # If no sections found, use full page content
-        if not chunks:
-            content = soup.get_text()
-            if len(content) > 100:
-                chunk_id = hashlib.md5(url.encode()).hexdigest()
-                chunk = DocumentChunk(
-                    id=chunk_id,
-                    content=content[:2000],  # Limit chunk size
-                    url=url,
-                    title=title,
-                    section="Main Content"
-                )
-                chunks.append(chunk)
-        
-        return chunks
-    
-    async def index_documentation(self):
-        """Scrape docs and build vector index"""
-        logger.info("Starting documentation indexing...")
-        
-        chunks = await self.scrape_docs()
-        
-        if not chunks:
-            logger.warning("No documentation chunks found")
-            return
-        
-        # Generate embeddings
-        logger.info(f"Generating embeddings for {len(chunks)} chunks...")
-        contents = [chunk.content for chunk in chunks]
-        embeddings = ai.embedding_model.encode(contents).tolist()
-        
-        # Store in ChromaDB
-        ids = [chunk.id for chunk in chunks]
-        metadatas = [
-            {
-                "url": chunk.url,
-                "title": chunk.title,
-                "section": chunk.section
-            }
-            for chunk in chunks
-        ]
-        
-        ai.collection.upsert(
-            ids=ids,
-            embeddings=embeddings,
-            documents=contents,
-            metadatas=metadatas
-        )
-        
-        logger.info(f"Indexed {len(chunks)} documentation chunks")
+        return self.docs_content
 
 docs_manager = DocumentationManager()
 
-# RAG search functionality
-class RAGSearcher:
-    def search_docs(self, query: str, top_k: int = 5) -> List[Dict]:
-        """Search documentation using vector similarity"""
-        query_embedding = ai.embedding_model.encode([query]).tolist()[0]
-        
-        results = ai.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            include=["documents", "metadatas", "distances"]
-        )
-        
-        search_results = []
-        for i in range(len(results['documents'][0])):
-            search_results.append({
-                "content": results['documents'][0][i],
-                "metadata": results['metadatas'][0][i],
-                "similarity": 1 - results['distances'][0][i]  # Convert distance to similarity
-            })
-        
-        return search_results
-
-rag_searcher = RAGSearcher()
-
-# AI Support Agent
+# AI Support Agent (simplified)
 class SupportAgent:
     def __init__(self):
         self.system_prompt = """
@@ -272,7 +110,6 @@ You help users with questions about Corti's API, documentation, and platform fea
 Guidelines:
 - Always identify yourself as an AI assistant in your response
 - Provide helpful, accurate responses based on the documentation provided
-- Include relevant links when available
 - If you cannot confidently answer from the documentation, say so and suggest escalation
 - Be professional, empathetic, and helpful
 - For technical issues requiring debugging, acknowledge limitations and escalate
@@ -280,39 +117,27 @@ Guidelines:
 
 Response format:
 - Start with a clear, helpful answer
-- Include relevant documentation references
+- Include relevant documentation references if available
 - End with next steps or escalation if needed
 """
 
     async def generate_response(self, user_message: str, conversation_context: Dict) -> SupportResponse:
         """Generate AI response to support ticket"""
         
-        # Search relevant documentation
-        search_results = rag_searcher.search_docs(user_message, top_k=3)
-        
-        # Filter results by confidence
-        relevant_docs = [
-            result for result in search_results 
-            if result['similarity'] > config.CONFIDENCE_THRESHOLD
-        ]
-        
-        if not relevant_docs:
+        if not claude_client:
             return SupportResponse(
-                message=self._generate_escalation_message(),
+                message=self._generate_error_message(),
                 confidence=0.0,
                 sources=[],
                 should_escalate=True
             )
         
-        # Prepare context for LLM
-        doc_context = "\n\n".join([
-            f"**{doc['metadata']['section']}** (from {doc['metadata']['url']}):\n{doc['content']}"
-            for doc in relevant_docs
-        ])
+        # Get basic documentation context
+        doc_context = await docs_manager.fetch_docs()
         
         # Generate response using Claude
         try:
-            response = ai.claude_client.messages.create(
+            response = claude_client.messages.create(
                 model=config.LLM_MODEL,
                 max_tokens=1000,
                 temperature=0.3,
@@ -323,10 +148,10 @@ Response format:
                         "content": f"""
 User Question: {user_message}
 
-Relevant Documentation:
+Available Documentation Context:
 {doc_context}
 
-Please provide a helpful response based on this documentation.
+Please provide a helpful response based on this information.
 """
                     }
                 ]
@@ -334,17 +159,17 @@ Please provide a helpful response based on this documentation.
             
             ai_response = response.content[0].text
             
-            # Calculate confidence based on doc relevance
-            avg_similarity = np.mean([doc['similarity'] for doc in relevant_docs])
+            # Simple confidence scoring based on response length and keywords
+            confidence = self._calculate_confidence(user_message, ai_response)
             
             # Check if we should escalate
-            should_escalate = self._should_escalate(user_message, ai_response, avg_similarity)
+            should_escalate = self._should_escalate(user_message, ai_response, confidence)
             
-            sources = [doc['metadata']['url'] for doc in relevant_docs]
+            sources = [config.CORTI_DOCS_BASE_URL] if doc_context else []
             
             return SupportResponse(
                 message=ai_response,
-                confidence=avg_similarity,
+                confidence=confidence,
                 sources=sources,
                 should_escalate=should_escalate
             )
@@ -358,6 +183,16 @@ Please provide a helpful response based on this documentation.
                 should_escalate=True
             )
     
+    def _calculate_confidence(self, user_message: str, ai_response: str) -> float:
+        """Simple confidence calculation"""
+        # Higher confidence for longer, more detailed responses
+        if len(ai_response) > 200 and "documentation" in ai_response.lower():
+            return 0.8
+        elif len(ai_response) > 100:
+            return 0.6
+        else:
+            return 0.4
+    
     def _should_escalate(self, user_message: str, ai_response: str, confidence: float) -> bool:
         """Determine if ticket should be escalated to human"""
         escalation_keywords = [
@@ -366,7 +201,7 @@ Please provide a helpful response based on this documentation.
         ]
         
         # Low confidence responses should escalate
-        if confidence < 0.6:
+        if confidence < 0.5:
             return True
             
         # Check for escalation keywords
@@ -375,13 +210,6 @@ Please provide a helpful response based on this documentation.
             return True
             
         return False
-    
-    def _generate_escalation_message(self) -> str:
-        return """🤖 **Corti Support Agent (AI Assistant)**
-
-I don't have enough information in our documentation to confidently answer your question. Let me connect you with a human agent who can provide better assistance.
-
-A member of our support team will respond shortly!"""
     
     def _generate_error_message(self) -> str:
         return """🤖 **Corti Support Agent (AI Assistant)**
@@ -551,10 +379,14 @@ class IntercomClient:
             "Authorization": f"Bearer {config.INTERCOM_ACCESS_TOKEN}",
             "Content-Type": "application/json",
             "Accept": "application/json"
-        }
+        } if config.INTERCOM_ACCESS_TOKEN else {}
     
     async def reply_to_conversation(self, conversation_id: str, message: str, sources: List[str] = None):
         """Send AI response to Intercom conversation"""
+        
+        if not config.INTERCOM_ACCESS_TOKEN:
+            logger.error("No Intercom access token configured")
+            return
         
         # Format message with sources
         formatted_message = message
@@ -563,13 +395,12 @@ class IntercomClient:
             for source in sources[:3]:  # Limit to 3 sources
                 formatted_message += f"• {source}\n"
         
-        formatted_message += "\n\n---\n*This is an automated first response based on our documentation. A human agent will review and follow up if additional assistance is needed.*"
+        formatted_message += "\n\n---\n*This is an automated response based on our documentation. A human agent will review and follow up if additional assistance is needed.*"
         
         payload = {
             "message_type": "comment",
             "type": "admin",
-            "body": formatted_message,
-            "admin_id": "ai_agent"  # You'll need to create or use an admin ID
+            "body": formatted_message
         }
         
         async with httpx.AsyncClient() as client:
@@ -591,6 +422,9 @@ class IntercomClient:
     
     async def add_tag_to_conversation(self, conversation_id: str, tag: str):
         """Add tag to conversation for tracking"""
+        if not config.INTERCOM_ACCESS_TOKEN:
+            return
+            
         payload = {
             "name": tag
         }
@@ -605,32 +439,6 @@ class IntercomClient:
             except Exception as e:
                 logger.error(f"Error adding tag: {e}")
 
-    async def add_internal_note(self, conversation_id: str, note: str):
-        """Add internal note for human agents"""
-        payload = {
-            "message_type": "note",
-            "type": "admin", 
-            "body": note,
-            "admin_id": "ai_agent"
-        }
-        
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    f"{self.base_url}/conversations/{conversation_id}/reply",
-                    headers=self.headers,
-                    json=payload,
-                    timeout=10.0
-                )
-                
-                if response.status_code in [200, 201]:
-                    logger.info(f"Successfully added note to conversation {conversation_id}")
-                else:
-                    logger.error(f"Failed to add note: {response.status_code} - {response.text}")
-                    
-            except Exception as e:
-                logger.error(f"Error adding note to Intercom: {e}")
-
 intercom_client = IntercomClient()
 
 # Webhook handlers
@@ -640,9 +448,6 @@ async def handle_intercom_webhook(
     background_tasks: BackgroundTasks
 ):
     """Handle incoming Intercom webhooks"""
-    
-    # Verify webhook (optional but recommended)
-    # You can implement webhook signature verification here
     
     try:
         payload = await request.json()
@@ -698,12 +503,6 @@ async def process_new_conversation(conversation_data: Dict):
         # Add tag to indicate AI draft is ready
         await intercom_client.add_tag_to_conversation(conversation_id, "ai-draft-ready")
         
-        # Optionally add internal note for human agents
-        await intercom_client.add_internal_note(
-            conversation_id=conversation_id,
-            note=f"🤖 AI Draft Ready (Confidence: {response.confidence:.2f})\n\nRecommendation: {'Escalate to human' if response.should_escalate else 'Ready to send'}"
-        )
-        
         logger.info(f"Draft prepared for conversation {conversation_id} - Escalate: {response.should_escalate}")
         
     except Exception as e:
@@ -746,45 +545,14 @@ async def reject_draft(conversation_id: str, reviewer: str = "human_agent"):
         logger.error(f"Error rejecting draft: {e}")
         raise HTTPException(status_code=500, detail="Error rejecting draft")
 
-@app.get("/drafts/{conversation_id}")
-async def get_draft_details(conversation_id: str):
-    """Get specific draft details"""
-    try:
-        drafts = await draft_manager.get_pending_drafts()
-        draft = next((d for d in drafts if d["conversation_id"] == conversation_id), None)
-        
-        if not draft:
-            raise HTTPException(status_code=404, detail="Draft not found")
-            
-        return draft
-    except Exception as e:
-        logger.error(f"Error fetching draft details: {e}")
-        raise HTTPException(status_code=500, detail="Error fetching draft details")
-
 # API endpoints
 @app.get("/")
 async def root():
     return {
-        "message": "Corti AI Support Agent System",
+        "message": "Corti AI Support Agent System - Simplified",
         "status": "running",
         "timestamp": datetime.now().isoformat()
     }
-
-@app.post("/test-response")
-async def test_ai_response(message: str):
-    """Test endpoint for AI response generation"""
-    response = await support_agent.generate_response(message, {})
-    return response.dict()
-
-@app.post("/reindex-docs")
-async def reindex_documentation():
-    """Manually trigger documentation reindexing"""
-    try:
-        await docs_manager.index_documentation()
-        return {"status": "success", "message": "Documentation reindexed"}
-    except Exception as e:
-        logger.error(f"Error reindexing docs: {e}")
-        return {"status": "error", "message": str(e)}
 
 @app.get("/health")
 async def health_check():
@@ -792,8 +560,7 @@ async def health_check():
     return {
         "status": "healthy",
         "components": {
-            "ai_model": "loaded",
-            "vector_db": "connected",
+            "claude_api": "configured" if config.ANTHROPIC_API_KEY else "not_configured",
             "intercom": "configured" if config.INTERCOM_ACCESS_TOKEN else "not_configured"
         }
     }
@@ -802,14 +569,14 @@ async def health_check():
 @app.on_event("startup")
 async def startup_event():
     """Initialize system on startup"""
-    logger.info("Starting Corti AI Support Agent System...")
+    logger.info("Starting Corti AI Support Agent System (Simplified)...")
     
-    # Index documentation on startup
+    # Fetch basic documentation
     try:
-        await docs_manager.index_documentation()
-        logger.info("Documentation indexing completed")
+        await docs_manager.fetch_docs()
+        logger.info("Basic documentation loaded")
     except Exception as e:
-        logger.error(f"Error during startup indexing: {e}")
+        logger.error(f"Error loading docs: {e}")
 
 if __name__ == "__main__":
     uvicorn.run(
