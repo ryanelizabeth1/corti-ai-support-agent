@@ -486,8 +486,8 @@ async def handle_intercom_webhook(
         # Continue with normal processing
         webhook_data = IntercomWebhookPayload(**payload)
         
-        if webhook_data.type == "conversation.user.created":
-            logger.info("🔍 PROCESSING conversation.user.created")
+        if webhook_data.type == "notification_event":
+            logger.info("🔍 PROCESSING notification_event")
             background_tasks.add_task(
                 process_new_conversation, 
                 webhook_data.data
