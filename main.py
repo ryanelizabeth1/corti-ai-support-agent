@@ -451,6 +451,37 @@ async def handle_intercom_webhook(
     
     try:
         payload = await request.json()
+        
+        # DEBUG: Log the entire payload
+        logger.info(f"🔍 DEBUG: Received webhook payload: {json.dumps(payload, indent=2)}")
+        
+        webhook_data = IntercomWebhookPayload(**payload)
+        
+        # DEBUG: Log the webhook type
+        logger.info(f"🔍 DEBUG: Webhook type: {webhook_data.type}")
+        
+        # Only process new conversations
+        if webhook_data.type == "conversation.user.created":
+            logger.info(f"🔍 DEBUG: Processing conversation.user.created event")
+            background_tasks.add_task(
+                process_new_conversation, 
+                webhook_data.data
+            )
+        else:
+            logger.info(f"🔍 DEBUG: Ignoring webhook type: {webhook_data.type}")
+            
+        return {"status": "received"}
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing webhook: {e}")
+        raise HTTPException(status_code=400, detail="Invalid webhook payload")
+    request: Request, 
+    background_tasks: BackgroundTasks
+):
+    """Handle incoming Intercom webhooks"""
+    
+    try:
+        payload = await request.json()
         webhook_data = IntercomWebhookPayload(**payload)
         
         # Only process new conversations
